@@ -26,7 +26,7 @@
 
     <target name="deploy">
         <copy file="geeklog-pear.tar.gz"
-              tofile="/usr/home/geeklog2/public_html/www/nightly"
+              todir="/usr/home/geeklog2/public_html/www/nightly"
               overwrite="true" />
     </target>
 
