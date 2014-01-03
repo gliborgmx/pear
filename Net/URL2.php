@@ -51,7 +51,7 @@
  * @author    Christian Schmidt <schmidt@php.net>
  * @copyright 2007-2009 Peytz & Co. A/S
  * @license   https://spdx.org/licenses/BSD-3-Clause BSD-3-Clause
- * @version   Release: 2.0.4
+ * @version   Release: 2.0.5
  * @link      https://pear.php.net/package/Net_URL2
  */
 class Net_URL2
@@ -466,54 +466,161 @@ class Net_URL2
      */
     public function getQueryVariables()
     {
-        $pattern = '([' .
-                   preg_quote($this->getOption(self::OPTION_SEPARATOR_INPUT)) .
-                   '])';
-        $parts   = preg_split($pattern, $this->_query, -1, PREG_SPLIT_NO_EMPTY);
+        $separator   = $this->getOption(self::OPTION_SEPARATOR_INPUT);
+        $encodeKeys  = $this->getOption(self::OPTION_ENCODE_KEYS);
+        $useBrackets = $this->getOption(self::OPTION_USE_BRACKETS);
+
         $return  = array();
 
-        foreach ($parts as $part) {
-            if (strpos($part, '=') !== false) {
-                list($key, $value) = explode('=', $part, 2);
-            } else {
-                $key   = $part;
-                $value = null;
-            }
+        for ($part = strtok($this->_query, $separator);
+            strlen($part);
+            $part = strtok($separator)
+        ) {
+            list($key, $value) = explode('=', $part, 2) + array(1 => '');
 
-            if ($this->getOption(self::OPTION_ENCODE_KEYS)) {
+            if ($encodeKeys) {
                 $key = rawurldecode($key);
             }
             $value = rawurldecode($value);
 
-            if ($this->getOption(self::OPTION_USE_BRACKETS)
-                && preg_match('(^(.*)\[([0-9a-zA-Z_-]*)\])', $key, $matches)
-            ) {
-
-                $key = $matches[1];
-                $idx = $matches[2];
-
-                // Ensure is an array
-                if (empty($return[$key]) || !is_array($return[$key])) {
-                    $return[$key] = array();
-                }
-
-                // Add data
-                if ($idx === '') {
+            if ($useBrackets) {
+                $return = $this->_queryArrayByKey($key, $value, $return);
+            } else {
+                if (isset($return[$key])) {
+                    $return[$key]  = (array) $return[$key];
                     $return[$key][] = $value;
                 } else {
-                    $return[$key][$idx] = $value;
+                    $return[$key] = $value;
                 }
-            } elseif (!$this->getOption(self::OPTION_USE_BRACKETS)
-                && !empty($return[$key])
-            ) {
-                $return[$key]   = (array) $return[$key];
-                $return[$key][] = $value;
-            } else {
-                $return[$key] = $value;
             }
         }
 
         return $return;
+    }
+
+    /**
+     * Parse a single query key=value pair into an existing php array
+     *
+     * @param string $key   query-key
+     * @param string $value query-value
+     * @param array  $array of existing query variables (if any)
+     *
+     * @return mixed
+     */
+    private function _queryArrayByKey($key, $value, array $array = array())
+    {
+        if (!strlen($key)) {
+            return $array;
+        }
+
+        $offset = $this->_queryKeyBracketOffset($key);
+        if ($offset === false) {
+            $name = $key;
+        } else {
+            $name = substr($key, 0, $offset);
+        }
+
+        if (!strlen($name)) {
+            return $array;
+        }
+
+        if (!$offset) {
+            // named value
+            $array[$name] = $value;
+        } else {
+            // array
+            $brackets = substr($key, $offset);
+            if (!isset($array[$name])) {
+                $array[$name] = null;
+            }
+            $array[$name] = $this->_queryArrayByBrackets(
+                $brackets, $value, $array[$name]
+            );
+        }
+
+        return $array;
+    }
+
+    /**
+     * Parse a key-buffer to place value in array
+     *
+     * @param string $buffer to consume all keys from
+     * @param string $value  to be set/add
+     * @param array  $array  to traverse and set/add value in
+     *
+     * @throws Exception
+     * @return array
+     */
+    private function _queryArrayByBrackets($buffer, $value, array $array = null)
+    {
+        $entry = &$array;
+
+        for ($iteration = 0; strlen($buffer); $iteration++) {
+            $open = $this->_queryKeyBracketOffset($buffer);
+            if ($open !== 0) {
+                // Opening bracket [ must exist at offset 0, if not, there is
+                // no bracket to parse and the value dropped.
+                // if this happens in the first iteration, this is flawed, see
+                // as well the second exception below.
+                if ($iteration) {
+                    break;
+                }
+                // @codeCoverageIgnoreStart
+                throw new Exception(
+                    'Net_URL2 Internal Error: '. __METHOD__ .'(): ' .
+                    'Opening bracket [ must exist at offset 0'
+                );
+                // @codeCoverageIgnoreEnd
+            }
+
+            $close = strpos($buffer, ']', 1);
+            if (!$close) {
+                // this error condition should never be reached as this is a
+                // private method and bracket pairs are checked beforehand.
+                // See as well the first exception for the opening bracket.
+                // @codeCoverageIgnoreStart
+                throw new Exception(
+                    'Net_URL2 Internal Error: '. __METHOD__ .'(): ' .
+                    'Closing bracket ] must exist, not found'
+                );
+                // @codeCoverageIgnoreEnd
+            }
+
+            $index = substr($buffer, 1, $close - 1);
+            if (strlen($index)) {
+                $entry = &$entry[$index];
+            } else {
+                if (!is_array($entry)) {
+                    $entry = array();
+                }
+                $entry[] = &$new;
+                $entry = &$new;
+                unset($new);
+            }
+            $buffer = substr($buffer, $close + 1);
+        }
+
+        $entry = $value;
+
+        return $array;
+    }
+
+    /**
+     * Query-key has brackets ("...[]")
+     *
+     * @param string $key query-key
+     *
+     * @return bool|int offset of opening bracket, false if no brackets
+     */
+    private function _queryKeyBracketOffset($key)
+    {
+        if (false !== $open = strpos($key, '[')
+            and false === strpos($key, ']', $open + 1)
+        ) {
+            $open = false;
+        }
+
+        return $open;
     }
 
     /**
@@ -752,44 +859,42 @@ class Net_URL2
             $target->setAuthority($reference->getAuthority());
             $target->_path  = self::removeDotSegments($reference->_path);
             $target->_query = $reference->_query;
-            $target->_fragment = $reference->_fragment;
-            return $target;
-        }
-
-        $authority = $reference->getAuthority();
-        if ($authority !== false) {
-            $target->setAuthority($authority);
-            $target->_path  = self::removeDotSegments($reference->_path);
-            $target->_query = $reference->_query;
         } else {
-            if ($reference->_path == '') {
-                $target->_path = $this->_path;
-                if ($reference->_query !== false) {
-                    $target->_query = $reference->_query;
-                } else {
-                    $target->_query = $this->_query;
-                }
-            } else {
-                if (substr($reference->_path, 0, 1) == '/') {
-                    $target->_path = self::removeDotSegments($reference->_path);
-                } else {
-                    // Merge paths (RFC 3986, section 5.2.3)
-                    if ($this->_host !== false && $this->_path == '') {
-                        $target->_path = '/' . $reference->_path;
-                    } else {
-                        $i = strrpos($this->_path, '/');
-                        if ($i !== false) {
-                            $target->_path = substr($this->_path, 0, $i + 1);
-                        }
-                        $target->_path .= $reference->_path;
-                    }
-                    $target->_path = self::removeDotSegments($target->_path);
-                }
+            $authority = $reference->getAuthority();
+            if ($authority !== false) {
+                $target->setAuthority($authority);
+                $target->_path  = self::removeDotSegments($reference->_path);
                 $target->_query = $reference->_query;
+            } else {
+                if ($reference->_path == '') {
+                    $target->_path = $this->_path;
+                    if ($reference->_query !== false) {
+                        $target->_query = $reference->_query;
+                    } else {
+                        $target->_query = $this->_query;
+                    }
+                } else {
+                    if (substr($reference->_path, 0, 1) == '/') {
+                        $target->_path = self::removeDotSegments($reference->_path);
+                    } else {
+                        // Merge paths (RFC 3986, section 5.2.3)
+                        if ($this->_host !== false && $this->_path == '') {
+                            $target->_path = '/' . $reference->_path;
+                        } else {
+                            $i = strrpos($this->_path, '/');
+                            if ($i !== false) {
+                                $target->_path = substr($this->_path, 0, $i + 1);
+                            }
+                            $target->_path .= $reference->_path;
+                        }
+                        $target->_path = self::removeDotSegments($target->_path);
+                    }
+                    $target->_query = $reference->_query;
+                }
+                $target->setAuthority($this->getAuthority());
             }
-            $target->setAuthority($this->getAuthority());
+            $target->_scheme = $this->_scheme;
         }
-        $target->_scheme = $this->_scheme;
 
         $target->_fragment = $reference->_fragment;
 
